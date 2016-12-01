@@ -1,0 +1,285 @@
+#!/bin/bash
+
+set -e
+
+get_metadata() {
+    echo $(curl -s http://rancher-metadata/2015-07-25/self/service/metadata/$1)
+}
+
+wait_for_metadata() {
+    if [ -z "$STACK_NAME" ]; then
+        counter=0
+        printf 'Waiting for metadata'
+        until $(curl --output /dev/null --silent --head --fail http://rancher-metadata); do
+            printf '.'
+            sleep 3
+            counter=$((counter + 1))
+            if [ "$counter" -gt 10 ]; then
+                echo
+                echo "Could not reach metadata." >&2
+                exit 1
+            fi
+        done
+        echo
+    else
+        echo "STACK_NAME env var is set. Will look for all settings as environment variables. Not waiting for metadata."
+    fi
+}
+
+storagepool_agent() {
+    wait_for_metadata
+
+    STACK_NAME=$(curl -s http://rancher-metadata/2015-07-25/self/stack/name)
+    CONVOY_SOCK_IN_CON=/host/var/run/convoy-$STACK_NAME.sock
+
+    exec convoy-agent \
+        -d \
+        --url $CATTLE_URL \
+        --access-key $CATTLE_ACCESS_KEY \
+        --secret-key $CATTLE_SECRET_KEY \
+        --storagepool-driver $STACK_NAME \
+        --socket $CONVOY_SOCK_IN_CON \
+        storagepool
+}
+
+common_vars() {
+    STACK_NAME=${STACK_NAME:-$(curl -s http://rancher-metadata/2015-07-25/self/stack/name)}
+    STACK_UUID=${STACK_UUID:-$(curl -s http://rancher-metadata/2015-07-25/self/stack/uuid)}
+    CONVOY_SOCK_IN_CON=/host/var/run/convoy-$STACK_NAME.sock
+    CONVOY_SOCK_ON_HOST=/var/run/convoy-$STACK_NAME.sock
+    CONVOY_ROOT=/var/lib/rancher/convoy/$STACK_NAME-$STACK_UUID
+}
+
+devicemapper_common_vars() {
+    common_vars
+    CONVOY_ROOT=/var/lib/rancher/convoy/devicemapper/$STACK_NAME
+}
+
+volume_agent_devicemapper() {
+    wait_for_metadata
+    devicemapper_common_vars
+
+    echo "Registering convoy socket at $CONVOY_SOCK_ON_HOST"
+    echo "unix://$CONVOY_SOCK_ON_HOST" > /etc/docker/plugins/$STACK_NAME.spec
+
+    exec convoy-agent \
+        --url $CATTLE_URL \
+        --access-key $CATTLE_ACCESS_KEY \
+        --secret-key $CATTLE_SECRET_KEY \
+        --storagepool-driver $STACK_NAME \
+        --socket $CONVOY_SOCK_IN_CON \
+        volume \
+        --convoy-root $CONVOY_ROOT \
+        --convoy-drivers devicemapper \
+        --convoy-mnt-ns /host/proc/1/ns/mnt \
+        --convoy-driver-opts "dm.thinpoolname=$STACK_NAME" \
+        --convoy-driver-opts "dm.datadev=/host/dev/test/data" \
+        --convoy-driver-opts "dm.metadatadev=/host/dev/test/metadata" 
+}
+
+volume_agent_glusterfs() {
+    if [ ! -e /dev/fuse ]; then
+        echo Failed to find /dev/fuse attempting: modprobe fuse
+        modprobe fuse
+        exit 1
+    fi
+
+    wait_for_metadata
+    common_vars
+    /var/lib/rancher/convoy-agent/share-mnt $CONVOY_ROOT -- /launch  volume-agent-glusterfs-internal
+}
+
+volume_agent_glusterfs_internal() {
+    wait_for_metadata
+    common_vars
+    GLUSTER_STACK_NAME=$(get_metadata gluster_stack)
+    SERVERS=$(get_metadata servers)
+    VOLUME_POOL=$(get_metadata volume_pool)
+
+    echo "Registering convoy socket at $CONVOY_SOCK_ON_HOST"
+    echo "unix://$CONVOY_SOCK_ON_HOST" > /etc/docker/plugins/$STACK_NAME.spec
+
+    exec convoy-agent \
+        --url $CATTLE_URL \
+        --access-key $CATTLE_ACCESS_KEY \
+        --secret-key $CATTLE_SECRET_KEY \
+        --storagepool-driver $STACK_NAME \
+        --socket $CONVOY_SOCK_IN_CON \
+        volume \
+        --convoy-root $CONVOY_ROOT \
+        --convoy-drivers glusterfs \
+        --convoy-driver-opts glusterfs.defaultvolumepool=$VOLUME_POOL \
+        --convoy-driver-opts glusterfs.servers=$SERVERS
+}
+
+longhorn_common_vars() {
+    common_vars
+    CONVOY_ROOT=/var/lib/rancher/convoy/longhorn
+}
+
+volume_driver_longhorn() {
+    wait_for_metadata
+    longhorn_common_vars
+    /var/lib/rancher/convoy-agent/share-mnt $CONVOY_ROOT -- /launch  volume-driver-longhorn-internal "$@"
+}
+
+volume_agent_longhorn() {
+    wait_for_metadata
+    longhorn_common_vars
+
+    exec convoy-agent \
+        --url $CATTLE_URL \
+        --access-key $CATTLE_ACCESS_KEY \
+        --secret-key $CATTLE_SECRET_KEY \
+        --storagepool-driver $STACK_NAME \
+        --socket $CONVOY_SOCK_IN_CON \
+        volume \
+        --convoy-root $CONVOY_ROOT \
+        --convoy-drivers longhorn \
+        --convoy-driver-opts "lh.rancherurl=$CATTLE_URL" \
+        --convoy-driver-opts "lh.rancheraccesskey=$CATTLE_ACCESS_KEY" \
+        --convoy-driver-opts "lh.ranchersecretkey=$CATTLE_SECRET_KEY" \
+        --components=agent
+        "$@"
+}
+
+volume_driver_longhorn_internal() {
+    wait_for_metadata
+    longhorn_common_vars
+
+    mount --rbind /host/dev /dev
+
+    echo "Registering convoy socket at $CONVOY_SOCK_ON_HOST"
+    if echo "$@" | grep -q convoy && [ -e $CONVOY_SOCK_IN_CON ]; then
+        rm $CONVOY_SOCK_IN_CON
+    fi
+    echo "unix://$CONVOY_SOCK_ON_HOST" > /etc/docker/plugins/$STACK_NAME.spec
+
+    exec convoy-agent \
+        --url $CATTLE_URL \
+        --access-key $CATTLE_ACCESS_KEY \
+        --secret-key $CATTLE_SECRET_KEY \
+        --storagepool-driver $STACK_NAME \
+        --socket $CONVOY_SOCK_IN_CON \
+        volume \
+        --convoy-root $CONVOY_ROOT \
+        --convoy-drivers longhorn \
+        --convoy-driver-opts "lh.rancherurl=$CATTLE_URL" \
+        --convoy-driver-opts "lh.rancheraccesskey=$CATTLE_ACCESS_KEY" \
+        --convoy-driver-opts "lh.ranchersecretkey=$CATTLE_SECRET_KEY" \
+        --convoy-ignore-docker-delete \
+        --components=driver
+        "$@"
+}
+
+volume_agent_nfs() {
+    wait_for_metadata
+    common_vars
+    sleep 1
+    PARENT=$(ps --no-header --pid $$ -o ppid)
+    /var/lib/rancher/convoy-agent/share-mnt $CONVOY_ROOT -- /launch  volume-agent-nfs-internal $PARENT
+}
+
+
+volume_agent_nfs_internal() {
+    TARGET_PID=${1?"Cannot run without target pid"}
+
+    common_vars
+    MNT_HOST=${MNT_HOST:-$(get_metadata nfs_server)}
+    MNT_DIR=${MNT_DIR:-$(get_metadata mount_dir)}
+    MNT_OPTS=${MNT_OPTS:-$(get_metadata mount_opts)}
+    if [ -n "$MNT_OPTS" ]; then
+        MNT_OPTS="-o $MNT_OPTS"
+    fi
+    MNT_PT=$CONVOY_ROOT/mnt
+
+    echo "Registering convoy socket at $CONVOY_SOCK_ON_HOST"
+    echo "unix://$CONVOY_SOCK_ON_HOST" > /etc/docker/plugins/$STACK_NAME.spec
+
+    echo "Mounting at: $MNT_PT"
+    nsenter -t $TARGET_PID -n rpcbind
+    nsenter -t $TARGET_PID -n rpc.statd
+    mkdir -p $MNT_PT
+    echo "Mounting nfs. Command: mount -t nfs $MNT_OPTS $MNT_HOST:$MNT_DIR $MNT_PT"
+    mountpoint -q $MNT_PT || nsenter -t $TARGET_PID -n mount -t nfs $MNT_OPTS $MNT_HOST:$MNT_DIR $MNT_PT
+
+    exec convoy-agent \
+        --url $CATTLE_URL \
+        --access-key $CATTLE_ACCESS_KEY \
+        --secret-key $CATTLE_SECRET_KEY \
+        --storagepool-driver $STACK_NAME \
+        --socket $CONVOY_SOCK_IN_CON \
+        volume \
+        --convoy-root $CONVOY_ROOT \
+        --convoy-drivers vfs \
+        --convoy-ignore-docker-delete \
+        --convoy-create-on-docker-mount \
+        --convoy-driver-opts vfs.path=$MNT_PT
+}
+
+volume_agent_efs() {
+    wait_for_metadata
+    common_vars
+    sleep 1
+    PARENT=$(ps --no-header --pid $$ -o ppid)
+    /var/lib/rancher/convoy-agent/share-mnt $CONVOY_ROOT -- /launch  volume-agent-efs-internal $PARENT
+}
+
+volume_agent_efs_internal() {
+    TARGET_PID=${1?"Cannot run without target pid"}
+
+    common_vars
+    MNT_HOST=$(eval echo "$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone).${MNT_HOST:-$(get_metadata efs_id)}.efs.${AWS_REGION:-$(get_metadata aws_region)}.amazonaws.com")
+    MNT_OPTS="nfsvers=4.1"
+    MNT_DIR=${MNT_DIR:-$(get_metadata mount_dir)}
+    if [ -n "$MNT_OPTS" ]; then
+        MNT_OPTS="-o $MNT_OPTS"
+    fi
+    MNT_PT=$CONVOY_ROOT/mnt
+
+    echo "Registering convoy socket at $CONVOY_SOCK_ON_HOST"
+    echo "unix://$CONVOY_SOCK_ON_HOST" > /etc/docker/plugins/$STACK_NAME.spec
+
+    echo "Mounting at: $MNT_PT"
+    nsenter -t $TARGET_PID -n rpcbind
+    nsenter -t $TARGET_PID -n rpc.statd
+    mkdir -p $MNT_PT
+    echo "Mounting nfs. Command: mount -t nfs $MNT_OPTS $MNT_HOST:$MNT_DIR $MNT_PT"
+    mountpoint -q $MNT_PT || nsenter -t $TARGET_PID -n mount -t nfs $MNT_OPTS $MNT_HOST:$MNT_DIR $MNT_PT
+
+    exec convoy-agent \
+        --url $CATTLE_URL \
+        --access-key $CATTLE_ACCESS_KEY \
+        --secret-key $CATTLE_SECRET_KEY \
+        --storagepool-driver $STACK_NAME \
+        --socket $CONVOY_SOCK_IN_CON \
+        volume \
+        --convoy-root $CONVOY_ROOT \
+        --convoy-drivers vfs \
+        --convoy-ignore-docker-delete \
+        --convoy-create-on-docker-mount \
+        --convoy-driver-opts vfs.path=$MNT_PT
+}
+
+valid_func() {
+    [ -n "$1" ] && declare -F | grep -q $cmd
+}
+
+valid_funcs() {
+    local funcs="storagepool-agent"
+    for i in $(declare -F | awk '{print $3}' | grep ^volume_agent); do
+        funcs="${funcs}|$(echo $i | sed 's/_/-/g')"
+    done
+    echo $funcs
+}
+
+cmd=$(echo $1 | sed 's/-/_/g')
+
+if ! valid_func "$@"; then
+    funcs=$(valid_funcs)
+    echo "Usage: $0 {${funcs}}"
+    exit 1
+fi
+
+shift 1
+$cmd "$@"
