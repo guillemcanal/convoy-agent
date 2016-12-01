@@ -73,8 +73,8 @@ volume_agent_devicemapper() {
         --convoy-drivers devicemapper \
         --convoy-mnt-ns /host/proc/1/ns/mnt \
         --convoy-driver-opts "dm.thinpoolname=$STACK_NAME" \
-        --convoy-driver-opts "dm.datadev=/host/dev/test/data" \
-        --convoy-driver-opts "dm.metadatadev=/host/dev/test/metadata" 
+        --convoy-driver-opts "dm.datadev=/dev/test/data" \
+        --convoy-driver-opts "dm.metadatadev=/dev/test/metadata" 
 }
 
 volume_agent_glusterfs() {
