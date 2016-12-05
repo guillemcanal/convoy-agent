@@ -5,7 +5,7 @@ convoy-dev:
     io.rancher.scheduler.affinity:host_label: convoy=true
   privileged: true
   pid: host
-  entrypoint: bash
+  entrypoint: /launch
   stdin_open: true
   tty: true
   volumes:
@@ -17,9 +17,9 @@ convoy-dev:
     - /dev:/dev
     - /var/lib/rancher/convoy:/var/lib/rancher/convoy
   image: ymian/convoy-agent
-#  command: volume-agent-devicemapper
+  command: volume-agent-devicemapper
 
-convoy-nfs-storagepool:
+convoy-dev-storagepool:
   labels:
     io.rancher.container.create_agent: 'true'
     io.rancher.scheduler.affinity:host_label: convoy=true
